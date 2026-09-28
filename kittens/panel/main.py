@@ -230,7 +230,11 @@ def actual_main(sys_args: list[str]) -> None:
         sys.argv.append('--grab-keyboard')
     for override in args.override:
         sys.argv.extend(('--override', override))
-    sys.argv.append('--override=linux_display_server=auto')
+    # quake fork: respect an explicit user override of linux_display_server
+    # instead of unconditionally clobbering it with auto (this override is
+    # appended after the user's, so it would always win).
+    if not any(o.split('=')[0].strip() == 'linux_display_server' for o in args.override):
+        sys.argv.append('--override=linux_display_server=auto')
     sys.argv.append('--override=macos_quit_when_last_window_closed=yes')
     sys.argv.append('--override=macos_hide_from_tasks=yes')
     sys.argv.append('--override=macos_window_resizable=no')
