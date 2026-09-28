@@ -217,8 +217,232 @@ glfw_cursor_shape_to_wayland_cursor_shape(GLFWCursorShape g) {
 static void
 commit_window_surface(_GLFWwindow *window) {
     // debug("Window %llu surface committed\n", window->id); dont log as every frame request causes a surface commit
+    // quake fork: never commit a layer shell window whose layer surface has
+    // been destroyed (the hidden state, see hide_layer_surface_offscreen).
+    // Committing a wl_surface after its role object has been destroyed is a
+    // protocol error on several compositors (e.g. cosmic-comp disconnects the
+    // client for it).
+    if (window->wl.surface && is_layer_shell(window) && !window->wl.layer_shell.zwlr_layer_surface_v1) return;
     wl_surface_commit(window->wl.surface);
 }
+
+// Start of quake fork additions {{{
+static void layer_set_properties(const _GLFWwindow *window, bool during_creation, uint32_t width, uint32_t height);
+static bool create_layer_shell_surface(_GLFWwindow *window);
+static bool create_surface(_GLFWwindow *window, const _GLFWwndconfig *wndconfig);
+
+static bool
+layer_shell_slide_axis(_GLFWwindow *window, int *hidden_margin, int *final_margin, int *margin_index) {
+    // The slide animation is performed by animating the layer surface margin
+    // from a value that pushes the surface fully past its docked edge
+    // (off-screen) to its configured value. Returns false if the window is not
+    // docked to an edge that supports sliding. margin_index: 0=top 1=right
+    // 2=bottom 3=left (matches zwlr_layer_surface_v1_set_margin order).
+    const GLFWLayerShellConfig *c = &window->wl.layer_shell.config;
+    *hidden_margin = 0; *final_margin = 0; *margin_index = 0;
+    switch (c->edge) {
+        case GLFW_EDGE_TOP:
+            *hidden_margin = -(int)window->wl.height; *final_margin = c->requested_top_margin; *margin_index = 0; return true;
+        case GLFW_EDGE_BOTTOM:
+            *hidden_margin = -(int)window->wl.height; *final_margin = c->requested_bottom_margin; *margin_index = 2; return true;
+        case GLFW_EDGE_LEFT:
+            *hidden_margin = -(int)window->wl.width; *final_margin = c->requested_left_margin; *margin_index = 3; return true;
+        case GLFW_EDGE_RIGHT:
+            *hidden_margin = -(int)window->wl.width; *final_margin = c->requested_right_margin; *margin_index = 1; return true;
+        default: return false;
+    }
+}
+
+static void
+set_layer_surface_margin(_GLFWwindow *window, int m0, int m1, int m2, int m3) {
+    if (window->wl.layer_shell.zwlr_layer_surface_v1)
+        zwlr_layer_surface_v1_set_margin(window->wl.layer_shell.zwlr_layer_surface_v1, m0, m1, m2, m3);
+}
+
+static void
+set_layer_surface_slide_margin(_GLFWwindow *window, int margin_index, int value) {
+    const GLFWLayerShellConfig *c = &window->wl.layer_shell.config;
+    int m[4] = {c->requested_top_margin, c->requested_right_margin, c->requested_bottom_margin, c->requested_left_margin};
+    if (margin_index < 0 || margin_index > 3) return;
+    m[margin_index] = value;
+    set_layer_surface_margin(window, m[0], m[1], m[2], m[3]);
+}
+
+static void
+arm_layer_shell_slide_in(_GLFWwindow *window) {
+    // Arrange for a layer surface that is about to be mapped by the next
+    // buffer swap (freshly created, still without a buffer) to be mapped
+    // off-screen (pushed past its docked edge with a negative margin) and arm
+    // pending_slide so that after the swap the slide-in animation runs.
+    window->wl.layer_shell.pending_slide = false;
+    if (window->wl.layer_shell.config.slide_duration_ms <= 0) return;
+    int hidden_margin, final_margin, margin_index;
+    if (!layer_shell_slide_axis(window, &hidden_margin, &final_margin, &margin_index)) return;
+    set_layer_surface_slide_margin(window, margin_index, hidden_margin);
+    window->wl.layer_shell.pending_slide = true;
+    commit_window_surface(window);
+}
+
+static void
+animate_layer_surface_slide(_GLFWwindow *window, int from_margin, int to_margin, int margin_index, int duration_ms) {
+    // Slide a layer surface by committing progressive set_margin requests
+    // interpolating the animated margin between from_margin and to_margin.
+    // Runs on the glfw thread and blocks it for the duration of the animation.
+    if (!window->wl.layer_shell.zwlr_layer_surface_v1 || duration_ms <= 0) return;
+    const int total_steps = duration_ms / 10 + 1;  // aim for ~10ms per step
+    const monotonic_t start = monotonic(), total = ms_to_monotonic_t((monotonic_t)duration_ms);
+    for (int i = 1; i <= total_steps; i++) {
+        const double t = (double)i / (double)total_steps;
+        const double inv = 1.0 - t;
+        const double eased = 1.0 - inv * inv * inv;  // ease-out cubic
+        const int m = (int)((double)from_margin + (double)(to_margin - from_margin) * eased);
+        set_layer_surface_slide_margin(window, margin_index, m);
+        wl_surface_commit(window->wl.surface);
+        wl_display_flush(_glfw.wl.display);
+        if (i < total_steps) {
+            const monotonic_t target = start + total * i / total_steps, now = monotonic();
+            if (target > now) {
+                struct timespec ts = {0};
+                monotonic_t remaining_ns = target - now;
+                ts.tv_sec = (time_t)(remaining_ns / 1000000000ll);
+                ts.tv_nsec = (long)(remaining_ns % 1000000000ll);
+                nanosleep(&ts, NULL);
+            }
+        }
+    }
+    set_layer_surface_slide_margin(window, margin_index, to_margin);
+    wl_surface_commit(window->wl.surface);
+    wl_display_flush(_glfw.wl.display);
+}
+
+static void
+hide_layer_surface_offscreen(_GLFWwindow *window) {
+    // quake fork hidden state for layer shell windows: slide the surface out
+    // past its docked edge, then destroy the layer surface. Merely unmapping
+    // with a null buffer commit is unrecoverable on compositors such as
+    // cosmic-comp and niri (they never send a fresh configure event for a
+    // remapped layer surface), and staying mapped keeps the keyboard focus
+    // stuck on the hidden surface (cosmic-comp fixes keyboard interactivity
+    // at map time and ignores runtime changes). Destroying the layer surface
+    // unmaps the surface and definitively releases the keyboard; showing
+    // again re-creates the wl_surface from scratch (see
+    // recreate_wl_surface_for_layer_shell).
+    if (!window->wl.layer_shell.zwlr_layer_surface_v1) return;
+    if (window->wl.layer_shell.config.slide_duration_ms > 0) {
+        int hidden_margin, final_margin, margin_index;
+        if (layer_shell_slide_axis(window, &hidden_margin, &final_margin, &margin_index)) {
+            animate_layer_surface_slide(window, final_margin, hidden_margin, margin_index, window->wl.layer_shell.config.slide_duration_ms);
+        }
+    } else {
+        int hidden_margin, final_margin, margin_index;
+        if (layer_shell_slide_axis(window, &hidden_margin, &final_margin, &margin_index))
+            set_layer_surface_slide_margin(window, margin_index, hidden_margin);
+    }
+    zwlr_layer_surface_v1_destroy(window->wl.layer_shell.zwlr_layer_surface_v1);
+    window->wl.layer_shell.zwlr_layer_surface_v1 = NULL;
+}
+
+static bool
+recreate_wl_surface_for_layer_shell(_GLFWwindow *window) {
+    // quake fork: re-show a hidden layer shell window by destroying its
+    // wl_surface (and everything bound to it) and creating a fresh one.
+    // A fresh wl_surface can be assigned the layer_surface role, gets a fresh
+    // configure event on every compositor, and gets its keyboard
+    // interactivity applied at map time (cosmic-comp only honours it then).
+    // The OpenGL context and all its resources survive; only the EGLSurface
+    // is re-created for the new wl_egl_window.
+
+    // --- tear down everything bound to the current surface ---
+    if (window->wl.frameCallbackData.current_wl_callback) {
+        wl_callback_destroy(window->wl.frameCallbackData.current_wl_callback);
+        window->wl.frameCallbackData.current_wl_callback = NULL;
+    }
+    if (window->wl.callback) {
+        wl_callback_destroy(window->wl.callback);
+        window->wl.callback = NULL;
+    }
+    if (window->wl.keyboard_shortcuts_inhibitor) {
+        zwp_keyboard_shortcuts_inhibitor_v1_destroy(window->wl.keyboard_shortcuts_inhibitor);
+        window->wl.keyboard_shortcuts_inhibitor = NULL;
+    }
+    if (window->wl.wp_fractional_scale_v1) {
+        wp_fractional_scale_v1_destroy(window->wl.wp_fractional_scale_v1);
+        window->wl.wp_fractional_scale_v1 = NULL;
+    }
+    if (window->wl.wp_viewport) {
+        wp_viewport_destroy(window->wl.wp_viewport);
+        window->wl.wp_viewport = NULL;
+    }
+    if (window->wl.org_kde_kwin_blur) {
+        org_kde_kwin_blur_release(window->wl.org_kde_kwin_blur);
+        window->wl.org_kde_kwin_blur = NULL;
+    }
+    if (window->wl.ext_background_effect_surface_v1) {
+        ext_background_effect_surface_v1_destroy(window->wl.ext_background_effect_surface_v1);
+        window->wl.ext_background_effect_surface_v1 = NULL;
+    }
+    if (window->wl.layer_shell.zwlr_layer_surface_v1) {
+        zwlr_layer_surface_v1_destroy(window->wl.layer_shell.zwlr_layer_surface_v1);
+        window->wl.layer_shell.zwlr_layer_surface_v1 = NULL;
+    }
+    // destroy the EGLSurface (unbinding it first, via the GLFW API so the
+    // context TLS state stays consistent with the actual EGL state), the
+    // wl_egl_window and the wl_surface itself. The GL context and config
+    // survive for re-use.
+    if (window->context.egl.surface != EGL_NO_SURFACE) {
+        glfwMakeContextCurrent(NULL);
+        eglDestroySurface(_glfw.egl.display, window->context.egl.surface);
+        window->context.egl.surface = EGL_NO_SURFACE;
+    }
+    if (window->wl.native) {
+        wl_egl_window_destroy(window->wl.native);
+        window->wl.native = NULL;
+    }
+    if (window->wl.surface) wl_surface_destroy(window->wl.surface);
+    window->wl.surface = NULL;
+    window->wl.monitorsCount = 0;  // wl_surface enter events repopulate this
+    memset(&window->wl.once, 0, sizeof(window->wl.once));
+    window->wl.waiting_for_swap_to_commit = false;
+
+    // --- create a fresh surface and egl window ---
+    _GLFWwndconfig wc = {0};
+    wc.width = window->wl.width;
+    wc.height = window->wl.height;
+    wc.blur_radius = window->wl.layer_shell.config.related.background_blur;
+    if (!create_surface(window, &wc)) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: failed to re-create surface for layer shell window");
+        return false;
+    }
+    debug("Re-created wl_surface and egl window for window %llu\n", window->id);
+    // fresh EGLSurface on the new wl_egl_window; context and config survive.
+    // This must happen before the layer surface creation roundtrip below,
+    // since events dispatched during that roundtrip (fractional scale etc.)
+    // resize the framebuffer and make the context current.
+    EGLSurface s = eglCreateWindowSurface(_glfw.egl.display, window->context.egl.config, (EGLNativeWindowType)window->wl.native, NULL);
+    if (s == EGL_NO_SURFACE) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "EGL: failed to re-create window surface while showing layer shell window");
+        return false;
+    }
+    window->context.egl.surface = s;
+    debug("Re-created EGLSurface for window %llu\n", window->id);
+    // fresh layer surface (also arms the slide-in animation if configured)
+    if (!create_layer_shell_surface(window)) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: failed to re-create layer surface while showing window");
+        return false;
+    }
+    debug("Re-created layer surface for window %llu\n", window->id);
+    return true;
+}
+
+static void
+show_layer_surface_onscreen(_GLFWwindow *window) {
+    // quake fork: hidden layer shell windows have their layer surface
+    // destroyed (see hide_layer_surface_offscreen), so showing them re-creates
+    // the whole wl_surface, which maps fresh with keyboard interactivity and
+    // (optionally) the slide-in animation.
+    (void)recreate_wl_surface_for_layer_shell(window);
+}
+// }}} end of quake fork additions
 
 static void
 commit_window_surface_if_safe(_GLFWwindow *window) {
@@ -435,6 +659,17 @@ _glfwWaylandAfterBufferSwap(_GLFWwindow *window) {
         // this is not really needed, since I think eglSwapBuffers() calls wl_surface_commit()
         // but lets be safe. See https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/egl/drivers/dri2/platform_wayland.c#L1510
         commit_window_surface(window);
+    }
+    // quake fork: the first buffer swap after creation/re-show maps the layer
+    // surface off-screen (armed via a negative margin), run the slide-in
+    // animation now that the surface is actually visible.
+    if (window->wl.layer_shell.pending_slide) {
+        window->wl.layer_shell.pending_slide = false;
+        int hidden_margin, final_margin, margin_index;
+        if (layer_shell_slide_axis(window, &hidden_margin, &final_margin, &margin_index)) {
+            const int slide_ms = window->wl.layer_shell.config.slide_duration_ms;
+            animate_layer_surface_slide(window, hidden_margin, final_margin, margin_index, slide_ms);
+        }
     }
 }
 
@@ -1163,6 +1398,7 @@ calculate_layer_size(_GLFWwindow *window, uint32_t *width, uint32_t *height) {
     const GLFWLayerShellConfig *config = &window->wl.layer_shell.config;
     GLFWvidmode m = {0};
     if (window->wl.monitorsCount) _glfwPlatformGetVideoMode(window->wl.monitors[0], &m);
+    else if (_glfw.monitorCount > 0) _glfwPlatformGetVideoMode(_glfw.monitors[0], &m);
     int monitor_width = m.width, monitor_height = m.height;
     const int y_margin = config->requested_bottom_margin + config->requested_top_margin,
               x_margin = config->requested_left_margin + config->requested_right_margin;
@@ -1181,8 +1417,12 @@ calculate_layer_size(_GLFWwindow *window, uint32_t *width, uint32_t *height) {
         if (!*height) *height = monitor_height;
         return;
     }
-    const unsigned xsz = config->x_size_in_pixels ? (unsigned)(config->x_size_in_pixels * xscale) : (cell_width * config->x_size_in_cells);
-    const unsigned ysz = config->y_size_in_pixels ? (unsigned)(config->y_size_in_pixels * yscale) : (cell_height * config->y_size_in_cells);
+    // quake fork: sizes specified as a percentage of the monitor are resolved
+    // here, in physical pixels of the monitor the layer is on, so that the
+    // existing pixel arithmetic (which divides by scale to get logical sizes)
+    // applies to them unchanged.
+    const unsigned xsz = config->x_size_in_pixels ? (unsigned)(config->x_size_in_pixels * xscale) : (config->x_size_in_percent ? (unsigned)(((uint64_t)monitor_width * config->x_size_in_percent) / 100) : (cell_width * config->x_size_in_cells));
+    const unsigned ysz = config->y_size_in_pixels ? (unsigned)(config->y_size_in_pixels * yscale) : (config->y_size_in_percent ? (unsigned)(((uint64_t)monitor_height * config->y_size_in_percent) / 100) : (cell_height * config->y_size_in_cells));
     debug("Calculating layer shell window size at scale: %f cell_size: %u %u sz: %u %u\n", xscale, cell_width, cell_height, xsz, ysz);
     if (config->edge == GLFW_EDGE_LEFT || config->edge == GLFW_EDGE_RIGHT) {
         if (!*height) *height = monitor_height;
@@ -1267,6 +1507,9 @@ create_layer_shell_surface(_GLFWwindow *window) {
     wl_display_roundtrip(_glfw.wl.display);
     window->wl.created = true;
 #undef ls
+    // quake fork: arrange the slide-in animation from off-screen, so that the
+    // surface is mapped off-screen at the first buffer swap and slides in.
+    arm_layer_shell_slide_in(window);
     return true;
 }
 
@@ -1817,9 +2060,13 @@ _glfwPlatformShowWindow(_GLFWwindow *window, bool move_to_active_screen UNUSED) 
         if (!window->wl.created) {
             create_window_desktop_surface(window);
             window->wl.visible = true;
+        } else if (is_layer_shell(window)) {
+            // quake fork: hidden layer shell windows stay mapped but off-screen
+            // and keyboard-inert (see hide_layer_surface_offscreen), so showing
+            // is just a slide back in plus restoring keyboard interactivity.
+            window->wl.visible = true;
+            show_layer_surface_onscreen(window);
         } else {
-            // workaround for kwin layer shell bug: https://bugs.kde.org/show_bug.cgi?id=503121
-            if (is_layer_shell(window)) layer_set_properties(window, false, window->wl.width, window->wl.height);
             window->wl.visible = true;
             commit_window_surface(window);
         }
@@ -1830,6 +2077,17 @@ _glfwPlatformShowWindow(_GLFWwindow *window, bool move_to_active_screen UNUSED) 
 void
 _glfwPlatformHideWindow(_GLFWwindow *window) {
     if (!window->wl.visible) return;
+    if (is_layer_shell(window)) {
+        // quake fork: hide by sliding off-screen and making the surface
+        // keyboard-inert, keeping it mapped. Compositors such as cosmic-comp
+        // and niri never send a fresh configure event to a layer surface
+        // remapped after a null-buffer unmap, so unmapping is unrecoverable
+        // there; staying mapped avoids that entirely.
+        hide_layer_surface_offscreen(window);
+        window->wl.visible = false;
+        debug("Window %llu hidden off-screen\n", window->id);
+        return;
+    }
     wl_surface_attach(window->wl.surface, NULL, 0, 0);
     window->wl.once.surface_configured = false;
     window->swaps_disallowed = true;

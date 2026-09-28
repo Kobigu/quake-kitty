@@ -590,6 +590,7 @@ panel_defaults = {
     'instance_group': '',
     'toggle_visibility': 'no',
     'start_as_hidden': 'no',
+    'slide_duration': '0',
     'detach': 'no',
     'detached_log': '',
 }
@@ -603,12 +604,24 @@ def build_panel_cli_spec(defaults: dict[str, str]) -> str:
 default={lines}
 The number of lines shown in the panel. Ignored for background, centered, and vertical panels.
 If it has the suffix :code:`px` then it sets the height of the panel in pixels instead of lines.
+If it has the suffix :code:`%` then the height is set to that percentage of the monitor height.
 
 
 --columns
 default={columns}
 The number of columns shown in the panel. Ignored for background, centered, and horizontal panels.
 If it has the suffix :code:`px` then it sets the width of the panel in pixels instead of columns.
+If it has the suffix :code:`%` then the width is set to that percentage of the monitor width.
+
+
+--slide-duration
+type=int
+default={slide_duration}
+When showing or hiding a layer-shell window docked to an edge, slide it in/out from
+the docked edge over this many milliseconds. Zero disables the animation. Requires
+a Wayland compositor that supports wlr-layer-shell version 4 or newer (set_offset);
+otherwise it is silently ignored. When the quick access terminal is hidden by other
+means than the toggle, the slide-out still applies.
 
 
 --margin-top

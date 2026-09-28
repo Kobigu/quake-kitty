@@ -1345,6 +1345,8 @@ typedef struct GLFWLayerShellConfig {
     GLFWFocusPolicy focus_policy;
     unsigned x_size_in_cells, x_size_in_pixels;
     unsigned y_size_in_cells, y_size_in_pixels;
+    unsigned x_size_in_percent, y_size_in_percent;  // quake fork: size as % of the monitor
+    int slide_duration_ms;  // quake fork: duration of the slide in/out animation
     int requested_top_margin, requested_left_margin, requested_bottom_margin, requested_right_margin;
     int requested_exclusive_zone, hide_on_focus_loss;
     unsigned override_exclusive_zone;

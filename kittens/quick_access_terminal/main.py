@@ -35,9 +35,9 @@ def help_of(x: str) -> str:
 
 agr('qat', 'Window appearance')
 
-opt('lines', '25', long_text=panel_opts['lines'].help)
+opt('lines', '50%', long_text=panel_opts['lines'].help)
 
-opt('columns', '80', long_text=panel_opts['columns'].help)
+opt('columns', '100%', long_text=panel_opts['columns'].help)
 
 opt('edge', 'top', choices=panel_opts['edge'].choices, long_text=help_of('edge'))
 
@@ -83,6 +83,28 @@ opt('margin_right', '0', option_type='int', long_text=help_of('margin_right'))
 opt('margin_top', '0', option_type='int', long_text=help_of('margin_top'))
 
 opt('margin_bottom', '0', option_type='int', long_text=help_of('margin_bottom'))
+
+opt(
+    'slide_duration',
+    '150',
+    option_type='int',
+    long_text="""
+Duration, in milliseconds, of the slide in/out animation when the quick access
+terminal is shown or hidden. Set to zero to disable. Requires a Wayland
+compositor with wlr-layer-shell version 4 or newer, otherwise silently ignored.
+""",
+)
+
+opt(
+    'listen_on',
+    '',
+    long_text="""
+Listen for remote control commands on the specified socket. Note that this is
+the CLI form of kitty's :opt:`listen_on` option, so the socket name is used
+exactly as specified (no per-PID suffix is appended), making it suitable for
+scripting with :code:`kitten @ --to <socket>`.
+""",
+)
 
 opt(
     '+kitty_conf',

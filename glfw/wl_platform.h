@@ -200,6 +200,7 @@ typedef struct _GLFWwindowWayland {
     struct {
         GLFWLayerShellConfig config;
         struct zwlr_layer_surface_v1 *zwlr_layer_surface_v1;
+        bool pending_slide;  // quake fork: slide-in animation armed for next buffer swap
     } layer_shell;
 
     /* information about axis events on current frame */

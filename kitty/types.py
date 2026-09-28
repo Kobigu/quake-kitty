@@ -81,6 +81,9 @@ class LayerShellConfig(NamedTuple):
     y_size_in_pixels: int = 0
     x_size_in_cells: int = 0
     y_size_in_cells: int = 0
+    x_size_in_percent: int = 0
+    y_size_in_percent: int = 0
+    slide_duration_ms: int = 0
     requested_top_margin: int = 0
     requested_left_margin: int = 0
     requested_bottom_margin: int = 0

@@ -1870,6 +1870,9 @@ layer_shell_config_to_python(const GLFWLayerShellConfig *c) {
     A(y_size_in_cells, fu);
     A(x_size_in_pixels, fu);
     A(y_size_in_pixels, fu);
+    A(x_size_in_percent, fu);
+    A(y_size_in_percent, fu);
+    A(slide_duration_ms, fl);
     A(requested_top_margin, fl);
     A(requested_left_margin, fl);
     A(requested_bottom_margin, fl);
@@ -1903,6 +1906,9 @@ layer_shell_config_from_python(PyObject *p, GLFWLayerShellConfig *ans) {
     A(y_size_in_cells, PyLong_Check, PyLong_AsUnsignedLong);
     A(x_size_in_pixels, PyLong_Check, PyLong_AsUnsignedLong);
     A(y_size_in_pixels, PyLong_Check, PyLong_AsUnsignedLong);
+    A(x_size_in_percent, PyLong_Check, PyLong_AsUnsignedLong);
+    A(y_size_in_percent, PyLong_Check, PyLong_AsUnsignedLong);
+    A(slide_duration_ms, PyLong_Check, PyLong_AsLong);
     A(requested_top_margin, PyLong_Check, PyLong_AsLong);
     A(requested_left_margin, PyLong_Check, PyLong_AsLong);
     A(requested_bottom_margin, PyLong_Check, PyLong_AsLong);

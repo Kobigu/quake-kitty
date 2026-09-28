@@ -42,6 +42,12 @@ func main(cmd *cli.Command, opts *Options, args []string) (rc int, err error) {
 	argv = append(argv, fmt.Sprintf("--columns=%s", conf.Columns))
 	argv = append(argv, fmt.Sprintf("--edge=%s", conf.Edge))
 	argv = append(argv, fmt.Sprintf("--layer=%s", conf.Layer))
+	if conf.Slide_duration > 0 {
+		argv = append(argv, fmt.Sprintf("--slide-duration=%d", conf.Slide_duration))
+	}
+	if conf.Listen_on != "" {
+		argv = append(argv, fmt.Sprintf("--listen-on=%s", conf.Listen_on))
+	}
 	if conf.Margin_top != 0 {
 		argv = append(argv, fmt.Sprintf("--margin-top=%d", conf.Margin_top))
 	}
@@ -99,7 +105,7 @@ func main(cmd *cli.Command, opts *Options, args []string) (rc int, err error) {
 		if dl, err := filepath.Abs(opts.DetachedLog); err != nil {
 			return 1, err
 		} else {
-			argv = append(argv, dl)
+			argv = append(argv, fmt.Sprintf("--detached-log=%s", dl))
 		}
 	}
 	if opts.InstanceGroup != "" {

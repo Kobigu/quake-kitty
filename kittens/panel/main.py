@@ -54,14 +54,16 @@ def parse_panel_args(args: list[str], track_seen_options: dict[str, Any] | None 
     )
 
 
-def dual_distance(spec: str, min_cell_value_if_no_pixels: int = 0) -> tuple[int, int]:
+def dual_distance(spec: str, min_cell_value_if_no_pixels: int = 0) -> tuple[int, int, int]:
     with suppress(Exception):
-        return int(spec), 0
+        return int(spec), 0, 0
     if spec.endswith('px'):
-        return min_cell_value_if_no_pixels, int(spec[:-2])
+        return min_cell_value_if_no_pixels, int(spec[:-2]), 0
+    if spec.endswith('%'):
+        return 0, 0, max(1, int(spec[:-1]))
     if spec.endswith('c'):
-        return int(spec[:-1]), 0
-    return min_cell_value_if_no_pixels, 0
+        return int(spec[:-1]), 0, 0
+    return min_cell_value_if_no_pixels, 0, 0
 
 
 def layer_shell_config(opts: PanelCLIOptions) -> LayerShellConfig:
@@ -89,8 +91,11 @@ def layer_shell_config(opts: PanelCLIOptions) -> LayerShellConfig:
         edge=edge,
         x_size_in_cells=x[0],
         x_size_in_pixels=x[1],
+        x_size_in_percent=x[2],
         y_size_in_cells=y[0],
         y_size_in_pixels=y[1],
+        y_size_in_percent=y[2],
+        slide_duration_ms=max(0, opts.slide_duration),
         requested_top_margin=max(0, opts.margin_top),
         requested_left_margin=max(0, opts.margin_left),
         requested_bottom_margin=max(0, opts.margin_bottom),
@@ -107,8 +112,9 @@ def layer_shell_config(opts: PanelCLIOptions) -> LayerShellConfig:
 def cli_option_to_lsc_configs_map() -> MappingProxyType[str, tuple[str, ...]]:
     return MappingProxyType(
         {
-            'lines': ('y_size_in_cells', 'y_size_in_pixels'),
-            'columns': ('x_size_in_cells', 'x_size_in_pixels'),
+            'lines': ('y_size_in_cells', 'y_size_in_pixels', 'y_size_in_percent'),
+            'columns': ('x_size_in_cells', 'x_size_in_pixels', 'x_size_in_percent'),
+            'slide_duration': ('slide_duration_ms',),
             'margin_top': ('requested_top_margin',),
             'margin_left': ('requested_left_margin',),
             'margin_bottom': ('requested_bottom_margin',),
